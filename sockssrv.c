@@ -314,44 +314,135 @@ static enum errorcode check_credentials(unsigned char* buf, size_t n) {
 	return EC_NOT_ALLOWED;
 }
 
+/* Read exactly len bytes without assuming TCP message boundaries. */
+static int recv_exact(int fd, unsigned char *buf, size_t len) {
+	while(len > 0) {
+		ssize_t n = recv(fd, buf, len, 0);
+
+		if(n < 0) {
+			if(errno == EINTR) continue;
+			return -1;
+		}
+		if(n == 0) return -1;
+
+		buf += n;
+		len -= (size_t)n;
+	}
+	return 0;
+}
+
 static int handshake(struct thread *t) {
 	unsigned char buf[1024];
-	ssize_t n;
+	int fd = t->client.fd;
 	int ret;
+	size_t n, ulen, plen;
 	enum authmethod am;
+
 	t->state = SS_1_CONNECTED;
-	while((n = recv(t->client.fd, buf, sizeof buf, 0)) > 0) {
-		switch(t->state) {
-			case SS_1_CONNECTED:
-				am = check_auth_method(buf, n, &t->client);
-				if(am == AM_NO_AUTH) t->state = SS_3_AUTHED;
-				else if (am == AM_USERNAME) t->state = SS_2_NEED_AUTH;
-				send_auth_response(t->client.fd, 5, am);
-				if(am == AM_INVALID) return -1;
-				break;
-			case SS_2_NEED_AUTH:
-				ret = check_credentials(buf, n);
-				send_auth_response(t->client.fd, 1, ret);
-				if(ret != EC_SUCCESS)
-					return -1;
-				t->state = SS_3_AUTHED;
-				if(auth_ips && !pthread_rwlock_wrlock(&auth_ips_lock)) {
-					if(!is_in_authed_list(&t->client.addr))
-						add_auth_ip(&t->client.addr);
-					pthread_rwlock_unlock(&auth_ips_lock);
-				}
-				break;
-			case SS_3_AUTHED:
-				ret = connect_socks_target(buf, n, &t->client);
-				if(ret < 0) {
-					send_error(t->client.fd, ret*-1);
-					return -1;
-				}
-				send_error(t->client.fd, EC_SUCCESS);
-				return ret;
+
+	/* greeting: VER, NMETHODS, METHODS[NMETHODS]. */
+	if(recv_exact(fd, buf, 2) < 0) return -1;
+	if(buf[0] != 5 || buf[1] == 0) {
+		send_auth_response(fd, 5, AM_INVALID);
+		return -1;
+	}
+
+	n = 2 + (size_t)buf[1];
+	if(recv_exact(fd, buf + 2, n - 2) < 0) return -1;
+
+	am = check_auth_method(buf, n, &t->client);
+	send_auth_response(fd, 5, am);
+	if(am == AM_INVALID) return -1;
+
+	if(am == AM_USERNAME) {
+		t->state = SS_2_NEED_AUTH;
+
+		/* authentication: VER, ULEN, UNAME, PLEN, PASSWD. */
+		if(recv_exact(fd, buf, 2) < 0) return -1;
+		if(buf[0] != 1 || buf[1] == 0) {
+			send_auth_response(fd, 1, EC_GENERAL_FAILURE);
+			return -1;
+		}
+
+		ulen = buf[1];
+
+		/* read username byte and the password-length byte. */
+		if(recv_exact(fd, buf + 2, ulen + 1) < 0)
+			return -1;
+
+		plen = buf[2 + ulen];
+		if(plen == 0) {
+			send_auth_response(fd, 1, EC_GENERAL_FAILURE);
+			return -1;
+		}
+
+		if(recv_exact(fd, buf + 3 + ulen, plen) < 0)
+			return -1;
+
+		n = 3 + ulen + plen;
+		ret = check_credentials(buf, n);
+		send_auth_response(fd, 1, ret);
+		if(ret != EC_SUCCESS) return -1;
+
+		if(auth_ips && !pthread_rwlock_wrlock(&auth_ips_lock)) {
+			if(!is_in_authed_list(&t->client.addr))
+				add_auth_ip(&t->client.addr);
+			pthread_rwlock_unlock(&auth_ips_lock);
 		}
 	}
-	return -1;
+
+	t->state = SS_3_AUTHED;
+
+	/* CONNECT request: VER, CMD, RSV, ATYP, address, port. */
+	if(recv_exact(fd, buf, 4) < 0) return -1;
+
+	if(buf[0] != 5 || buf[2] != 0) {
+		send_error(fd, EC_GENERAL_FAILURE);
+		return -1;
+	}
+	if(buf[1] != 1) {
+		send_error(fd, EC_COMMAND_NOT_SUPPORTED);
+		return -1;
+	}
+
+	switch(buf[3]) {
+		case 1: /* IPv4: 4-byte address + 2-byte port. */
+			n = 10;
+			if(recv_exact(fd, buf + 4, 6) < 0)
+				return -1;
+			break;
+
+		case 4: /* IPv6: 16-byte address + 2-byte port. */
+			n = 22;
+			if(recv_exact(fd, buf + 4, 18) < 0)
+				return -1;
+			break;
+
+		case 3: /* Domain: length byte, name, 2-byte port. */
+			if(recv_exact(fd, buf + 4, 1) < 0)
+				return -1;
+			if(buf[4] == 0) {
+				send_error(fd, EC_GENERAL_FAILURE);
+				return -1;
+			}
+			n = 7 + (size_t)buf[4];
+			if(recv_exact(fd, buf + 5, n - 5) < 0)
+				return -1;
+			break;
+
+		default:
+			send_error(fd, EC_ADDRESSTYPE_NOT_SUPPORTED);
+			return -1;
+	}
+
+	ret = connect_socks_target(buf, n, &t->client);
+	if(ret < 0) {
+		send_error(fd, -ret);
+		return -1;
+	}
+
+	send_error(fd, EC_SUCCESS);
+	return ret;
 }
 
 static void* clientthread(void *data) {
