@@ -510,6 +510,8 @@ static void zero_arg(char *s) {
 
 int main(int argc, char** argv) {
 	int ch;
+	fprintf(stderr, "DEBUG: patched binary started\n");
+	fflush(stderr);
 	const char *listenip = "0.0.0.0";
 	char *p, *q;
 	unsigned port = 1080;
@@ -579,6 +581,8 @@ int main(int argc, char** argv) {
 		return 1;
 	}
 	server = &s;
+	fprintf(stderr, "DEBUG: listening on %s:%u\n", listenip, port);
+	fflush(stderr);
 
 	while(1) {
 		collect(threads);
@@ -593,6 +597,8 @@ int main(int argc, char** argv) {
 			continue;
 		}
 		curr->client = c;
+		fprintf(stderr, "DEBUG: accepted fd=%d\n", c.fd);
+		fflush(stderr);
 		if(!sblist_add(threads, &curr)) {
 			close(curr->client.fd);
 			free(curr);
