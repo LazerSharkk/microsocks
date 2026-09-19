@@ -317,7 +317,12 @@ static enum errorcode check_credentials(unsigned char* buf, size_t n) {
 /* Read exactly len bytes without assuming TCP message boundaries. */
 static int recv_exact(int fd, unsigned char *buf, size_t len) {
 	while(len > 0) {
+		dolog("DEBUG: fd=%d waiting for %zu bytes\n", fd, len);
 		ssize_t n = recv(fd, buf, len, 0);
+		int saved_errno = errno;
+		dolog("DEBUG: fd=%d recv returned %zd, errno=%d\n",
+			fd, n, n < 0 ? saved_errno : 0);
+		errno = saved_errno;
 
 		if(n < 0) {
 			if(errno == EINTR) continue;
@@ -334,6 +339,7 @@ static int recv_exact(int fd, unsigned char *buf, size_t len) {
 static int handshake(struct thread *t) {
 	unsigned char buf[1024];
 	int fd = t->client.fd;
+	dolog("DEBUG: handshake started, fd=%d\n", fd);
 	int ret;
 	size_t n, ulen, plen;
 	enum authmethod am;
@@ -351,6 +357,7 @@ static int handshake(struct thread *t) {
 	if(recv_exact(fd, buf + 2, n - 2) < 0) return -1;
 
 	am = check_auth_method(buf, n, &t->client);
+	dolog("DEBUG: fd=%d selected auth method=%d\n", fd, (int)am);
 	send_auth_response(fd, 5, am);
 	if(am == AM_INVALID) return -1;
 
