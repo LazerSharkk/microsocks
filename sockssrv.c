@@ -253,10 +253,38 @@ static enum authmethod check_auth_method(unsigned char *buf, size_t n, struct cl
 }
 
 static void send_auth_response(int fd, int version, enum authmethod meth) {
-	unsigned char buf[2];
-	buf[0] = version;
-	buf[1] = meth;
-	write(fd, buf, 2);
+	unsigned char buf[2] = {
+		(unsigned char)version,
+		(unsigned char)meth
+	};
+	size_t sent = 0;
+
+	while(sent < sizeof buf) {
+		ssize_t n = write(fd, buf + sent, sizeof buf - sent);
+
+		if(n < 0) {
+			if(errno == EINTR) continue;
+			fprintf(stderr,
+			        "DEBUG: response write failed, fd=%d: %s\n",
+			        fd, strerror(errno));
+			fflush(stderr);
+			return;
+		}
+
+		if(n == 0) {
+			fprintf(stderr,
+			        "DEBUG: response write returned zero, fd=%d\n",
+			        fd);
+			fflush(stderr);
+			return;
+		}
+
+		sent += (size_t)n;
+	}
+
+	fprintf(stderr, "DEBUG: fd=%d wrote response %02x %02x\n",
+	        fd, (unsigned)buf[0], (unsigned)buf[1]);
+	fflush(stderr);
 }
 
 static void send_error(int fd, enum errorcode ec) {
