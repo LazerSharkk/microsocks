@@ -35,6 +35,7 @@
 #include <limits.h>
 #include "server.h"
 #include "sblist.h"
+#include <sys/socket.h>
 
 /* timeout in microseconds on resource exhaustion to prevent excessive
    cpu usage. */
@@ -252,39 +253,40 @@ static enum authmethod check_auth_method(unsigned char *buf, size_t n, struct cl
 	return AM_INVALID;
 }
 
-static void send_auth_response(int fd, int version, enum authmethod meth) {
+static int send_auth_response(int fd, int version, int status)
+{
 	unsigned char buf[2] = {
 		(unsigned char)version,
-		(unsigned char)meth
+		(unsigned char)status
 	};
 	size_t sent = 0;
 
 	while(sent < sizeof buf) {
-		ssize_t n = write(fd, buf + sent, sizeof buf - sent);
+		ssize_t n = send(fd, buf + sent, sizeof buf - sent, 0);
 
 		if(n < 0) {
-			if(errno == EINTR) continue;
-			fprintf(stderr,
-			        "DEBUG: response write failed, fd=%d: %s\n",
-			        fd, strerror(errno));
-			fflush(stderr);
-			return;
+			int err = errno;
+
+			if(err == EINTR)
+				continue;
+
+			dolog("DEBUG: fd=%d send failed: %s (errno=%d)\n",
+			      fd, strerror(err), err);
+			errno = err;
+			return -1;
 		}
 
 		if(n == 0) {
-			fprintf(stderr,
-			        "DEBUG: response write returned zero, fd=%d\n",
-			        fd);
-			fflush(stderr);
-			return;
+			dolog("DEBUG: fd=%d send returned zero\n", fd);
+			return -1;
 		}
 
 		sent += (size_t)n;
 	}
 
-	fprintf(stderr, "DEBUG: fd=%d wrote response %02x %02x\n",
-	        fd, (unsigned)buf[0], (unsigned)buf[1]);
-	fflush(stderr);
+	dolog("DEBUG: fd=%d send accepted %02x %02x\n",
+	      fd, (unsigned)buf[0], (unsigned)buf[1]);
+	return 0;
 }
 
 static void send_error(int fd, enum errorcode ec) {
@@ -384,10 +386,20 @@ static int handshake(struct thread *t) {
 	n = 2 + (size_t)buf[1];
 	if(recv_exact(fd, buf + 2, n - 2) < 0) return -1;
 
+	/* Log only the greeting methods, never credential bytes. */
+	for(size_t i = 2; i < n; ++i) {
+		dolog("DEBUG: fd=%d offered method=0x%02x\n",
+			fd, (unsigned)buf[i]);
+	}
+
 	am = check_auth_method(buf, n, &t->client);
 	dolog("DEBUG: fd=%d selected auth method=%d\n", fd, (int)am);
-	send_auth_response(fd, 5, am);
-	if(am == AM_INVALID) return -1;
+
+	if(send_auth_response(fd, 5, am) < 0)
+		return -1;
+
+	if(am == AM_INVALID)
+	return -1;
 
 	if(am == AM_USERNAME) {
 		t->state = SS_2_NEED_AUTH;
@@ -416,8 +428,12 @@ static int handshake(struct thread *t) {
 
 		n = 3 + ulen + plen;
 		ret = check_credentials(buf, n);
-		send_auth_response(fd, 1, ret);
-		if(ret != EC_SUCCESS) return -1;
+
+		if(send_auth_response(fd, 1, ret) < 0)
+			return -1;
+
+		if(ret != EC_SUCCESS)
+			return -1;
 
 		if(auth_ips && !pthread_rwlock_wrlock(&auth_ips_lock)) {
 			if(!is_in_authed_list(&t->client.addr))
