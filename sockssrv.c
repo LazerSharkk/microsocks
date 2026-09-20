@@ -371,7 +371,7 @@ static int handshake(struct thread *t) {
 	int fd = t->client.fd;
 	dolog("DEBUG: handshake started, fd=%d\n", fd);
 	int ret;
-	size_t n, ulen, plen;
+	size_t n, ulen, plen, i;
 	enum authmethod am;
 
 	t->state = SS_1_CONNECTED;
@@ -386,8 +386,8 @@ static int handshake(struct thread *t) {
 	n = 2 + (size_t)buf[1];
 	if(recv_exact(fd, buf + 2, n - 2) < 0) return -1;
 
-	/* Log only the greeting methods, never credential bytes. */
-	for(size_t i = 2; i < n; ++i) {
+	/* Log only greeting methods, never credential bytes. */
+	for(i = 2; i < n; ++i) {
 		dolog("DEBUG: fd=%d offered method=0x%02x\n",
 			fd, (unsigned)buf[i]);
 	}
